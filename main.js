@@ -29,8 +29,8 @@ class GitHubMediaUploader extends obsidian.Plugin {
         if (!isImage && !isVideo) return;
 
         const sizeInMB = file.size / (1024 * 1024);
-        if (sizeInMB > 99) {
-            new obsidian.Notice(`❌ File too big (${sizeInMB.toFixed(1)}MB). GitHub API limit is 100MB.`);
+        if (sizeInMB > 25) {
+            new obsidian.Notice(`❌ File too big (${sizeInMB.toFixed(1)}MB). GitHub API limit is 25MB.`);
             return;
         }
 
@@ -175,5 +175,6 @@ class SettingsTab extends obsidian.PluginSettingTab {
                 .onChange(async (v) => { this.plugin.settings.githubToken = v; await this.plugin.saveSettings(); }));
     }
 }
+
 
 module.exports = GitHubMediaUploader;
