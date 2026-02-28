@@ -11,27 +11,71 @@ const DEFAULT_SETTINGS = {
 class GitHubMediaUploader extends obsidian.Plugin {
     async onload() {
         await this.loadSettings();
+
         this.registerEvent(
             this.app.workspace.on('editor-paste', this.handlePaste.bind(this))
         );
+
+        this.registerEvent(
+            this.app.vault.on('create', this.handleFileCreate.bind(this))
+        );
+
         this.addSettingTab(new SettingsTab(this.app, this));
         console.log("GitHub Media Uploader Loaded");
     }
 
     async handlePaste(evt, editor, view) {
         const files = evt.clipboardData.files;
-        if (files.length === 0) return;
+        if (files.length === 0) return; 
         
         const file = files[0];
-        const isImage = file.type.startsWith('image/');
-        const isVideo = file.type.startsWith('video/');
+        if (!file.type.startsWith('image/') && !file.type.startsWith('video/')) return;
 
+        evt.preventDefault(); 
+        
+        await this.processUpload(file, editor, true);
+    }
+
+    async handleFileCreate(file) {
+        const isImage = ['png', 'jpg', 'jpeg', 'gif', 'svg', 'webp'].includes(file.extension);
+        const isVideo = ['mp4', 'webm', 'mov'].includes(file.extension);
         if (!isImage && !isVideo) return;
 
-        const sizeInMB = file.size / (1024 * 1024);
+        const activeLeaf = this.app.workspace.activeLeaf;
+        if (!activeLeaf || activeLeaf.view.getViewType() !== 'markdown') return;
+
+        const editor = activeLeaf.view.editor;
+        
+        await new Promise(r => setTimeout(r, 100));
+
+        const content = editor.getValue();
+        const linkString = `![[${file.name}]]`; 
+        if (!content.includes(file.name)) return; 
+
+        new obsidian.Notice(`⬆️ Mobile Upload Detected: ${file.name}`);
+
+        const binary = await this.app.vault.readBinary(file);
+        const base64Data = obsidian.arrayBufferToBase64(binary);
+
+        const fileObj = {
+            name: file.name,
+            type: isImage ? `image/${file.extension}` : `video/${file.extension}`,
+            base64: base64Data, 
+            size: file.stat.size
+        };
+
+        const success = await this.processUpload(fileObj, editor, false, linkString);
+
+        if (success) {
+            await this.app.vault.delete(file);
+        }
+    }
+
+    async processUpload(fileObj, editor, isPasteEvent, linkToReplace = null) {
+        const sizeInMB = fileObj.size / (1024 * 1024);
         if (sizeInMB > 25) {
-            new obsidian.Notice(`❌ File too big (${sizeInMB.toFixed(1)}MB). GitHub API limit is 25MB.`);
-            return;
+            new obsidian.Notice(`❌ File too big (${sizeInMB.toFixed(1)}MB). Limit 25MB.`);
+            return false;
         }
 
         const user = this.settings.githubUser.trim();
@@ -40,45 +84,53 @@ class GitHubMediaUploader extends obsidian.Plugin {
         const branch = this.settings.branch.trim();
 
         if (!user || !repo || !token) {
-            new obsidian.Notice("❌ Please configure GitHub settings first.");
-            return;
+            new obsidian.Notice("❌ Configure GitHub settings.");
+            return false;
         }
 
-        evt.preventDefault();
-        const placeholder = `![Uploading ${file.name}...]()`;
-        editor.replaceSelection(placeholder);
+        const placeholder = `![Uploading ${fileObj.name}...](${Date.now()})`;
+        if (isPasteEvent) {
+            editor.replaceSelection(placeholder);
+        } else if (linkToReplace) {
+            const current = editor.getValue();
+            editor.setValue(current.replace(linkToReplace, placeholder));
+        }
 
         try {
-            const base64Data = await this.fileToBase64(file);
-            const fileName = `${Date.now()}-${file.name.replace(/\s+/g, '-')}`;
+            let base64Data = fileObj.base64;
+            if (!base64Data && fileObj instanceof File) {
+                base64Data = await this.fileToBase64(fileObj);
+            }
+
+            const fileName = `${Date.now()}-${fileObj.name.replace(/\s+/g, '-')}`;
             
             let folder = this.settings.folderPath.trim();
             if (folder.endsWith('/')) folder = folder.slice(0, -1);
             const path = folder ? `${folder}/${fileName}` : fileName;
 
-            new obsidian.Notice(`⬆️ Uploading ${file.type}...`);
             await this.uploadToGithub(user, repo, token, branch, path, base64Data);
 
             const rawUrl = `https://raw.githubusercontent.com/${user}/${repo}/${branch}/${path}`;
+            const isImage = fileObj.type.startsWith('image/');
             
-            let embedCode = "";
-            if (isImage) {
-                embedCode = `![](${rawUrl})`;
-            } else if (isVideo) {
-                embedCode = `<video src="${rawUrl}" controls></video>`;
-            }
+            let embedCode = isImage ? `![](${rawUrl})` : `<video src="${rawUrl}" controls></video>`;
 
             const currentContent = editor.getValue();
-            const newContent = currentContent.replace(placeholder, embedCode);
-            editor.setValue(newContent);
+            if (currentContent.includes(placeholder)) {
+                 editor.setValue(currentContent.replace(placeholder, embedCode));
+            } else {
+                 editor.replaceSelection(embedCode);
+            }
             
             new obsidian.Notice(`✅ Uploaded: ${fileName}`);
+            return true;
 
         } catch (error) {
             console.error(error);
             new obsidian.Notice(`❌ Upload Failed: ${error.message}`);
             const currentContent = editor.getValue();
-            editor.setValue(currentContent.replace(placeholder, `[Upload Failed: ${error.message}]`));
+            editor.setValue(currentContent.replace(placeholder, `[Upload Failed: ${fileObj.name}]`));
+            return false;
         }
     }
 
